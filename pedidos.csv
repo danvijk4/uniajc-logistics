@@ -1,0 +1,8 @@
+id,cliente,subtotal,pesoKg,cantidadSolicitada,stockDisponible,historialValido,tieneCobertura,tipoEnvio,tarifaZona
+PED-101,Daniel,250.0,4.0,2,10,true,true,ESTANDAR,0
+PED-102,Laura,480.0,3.5,1,5,true,true,EXPRESS,0
+PED-103,Carlos,600.0,5.0,2,8,true,true,INTERNACIONAL,45.0
+PED-104,Ana,200.0,2.0,15,5,true,true,ESTANDAR,0
+PED-105,Luis,30.0,1.0,1,5,true,true,ESTANDAR,0
+PED-106,Desconocido,6500.0,2.5,1,5,false,true,EXPRESS,0
+PED-107,Sofia,350.0,3.0,1,5,true,false,ESTANDAR,0
