@@ -15,9 +15,8 @@ import com.uniajc.logistics.strategy.EstrategiaEnvio;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Scanner;
+import java.util.*;
+import java.util.function.Function;
 
 public class Main {
 
@@ -27,44 +26,65 @@ public class Main {
     private static BodegaListener bodegaObs;
     private static AuditoriaLogger auditoriaObs;
 
+    // Registro polimórfico de estrategias (CERO if/else y CERO switch)
+    private static final Map<String, Function<Double, EstrategiaEnvio>> REGISTRO_ESTRATEGIAS = Map.of(
+            "1", tarifa -> new EnvioEstandar(),
+            "ESTANDAR", tarifa -> new EnvioEstandar(),
+            "2", tarifa -> new EnvioExpress(),
+            "EXPRESS", tarifa -> new EnvioExpress(),
+            "3", EnvioInternacional::new,
+            "INTERNACIONAL", EnvioInternacional::new
+    );
+
+    // Registro polimórfico de acciones de estado (CERO switch)
+    private static final Map<String, AccionEstado> ACCIONES_ESTADO = Map.of(
+            "1", Pedido::pagar,
+            "2", Pedido::preparar,
+            "3", Pedido::enviar,
+            "4", Pedido::entregar,
+            "5", Pedido::cancelar
+    );
+
+    @FunctionalInterface
+    private interface AccionEstado {
+        void ejecutar(Pedido p) throws TransicionInvalidaException;
+    }
+
     public static void main(String[] args) {
         inicializarSistema();
         Scanner scanner = new Scanner(System.in);
-        int opcion = -1;
 
-        while (opcion != 0) {
+        Map<String, Runnable> menuAcciones = Map.of(
+                "1", () -> cargarDesdeCSV(scanner),
+                "2", () -> crearPedidoManual(scanner),
+                "3", Main::listarPedidos,
+                "4", () -> validarPedido(scanner),
+                "5", () -> cambiarEstrategiaEnvio(scanner),
+                "6", () -> gestionarEstadoPedido(scanner),
+                "7", Main::mostrarHistorialObservers
+        );
+
+        String opcion = "";
+        while (!opcion.equals("0")) {
             mostrarMenu();
-            try {
-                opcion = Integer.parseInt(scanner.nextLine().trim());
-            } catch (NumberFormatException e) {
-                System.out.println("Entrada inválida. Ingresa un número del menú.\n");
-                continue;
-            }
-
-            switch (opcion) {
-                case 1 -> cargarDesdeCSV(scanner);
-                case 2 -> crearPedidoManual(scanner);
-                case 3 -> listarPedidos();
-                case 4 -> validarPedido(scanner);
-                case 5 -> cambiarEstrategiaEnvio(scanner);
-                case 6 -> gestionarEstadoPedido(scanner);
-                case 7 -> mostrarHistorialObservers();
-                case 0 -> System.out.println("Saliendo del sistema logístico...");
-                default -> System.out.println("Opción no válida.\n");
+            opcion = scanner.nextLine().trim();
+            Runnable accion = menuAcciones.get(opcion);
+            while (accion != null) {
+                accion.run();
+                break;
             }
         }
+        System.out.println("Saliendo del sistema logístico...");
         scanner.close();
     }
 
     private static void inicializarSistema() {
-        // Chain of Responsibility
         cadenaValidacion = new ValidadorStock();
         cadenaValidacion
                 .enlazarCon(new ValidadorMontoMinimo())
                 .enlazarCon(new ValidadorFraude())
                 .enlazarCon(new ValidadorCobertura());
 
-        // Observers globales
         clienteObs = new ClienteNotificador();
         bodegaObs = new BodegaListener();
         auditoriaObs = new AuditoriaLogger();
@@ -87,22 +107,12 @@ public class Main {
 
     private static void cargarDesdeCSV(Scanner scanner) {
         System.out.print("Nombre del archivo CSV (Enter para 'pedidos.csv'): ");
-        String ruta = scanner.nextLine().trim();
-        if (ruta.isEmpty()) {
-            ruta = "pedidos.csv";
-        }
+        String entrada = scanner.nextLine().trim();
+        String ruta = entrada.isEmpty() ? "pedidos.csv" : entrada;
 
-        int cargados = 0;
         try (BufferedReader br = new BufferedReader(new FileReader(ruta))) {
-            String linea;
-            boolean primeraLinea = true;
-            while ((linea = br.readLine()) != null) {
-                if (primeraLinea) {
-                    primeraLinea = false;
-                    continue; // Saltar encabezado
-                }
-                if (linea.trim().isEmpty()) continue;
-
+            List<String> lineas = br.lines().skip(1).filter(l -> !l.trim().isEmpty()).toList();
+            for (String linea : lineas) {
                 String[] datos = linea.split(",");
                 String id = datos[0].trim();
                 String cliente = datos[1].trim();
@@ -115,13 +125,12 @@ public class Main {
                 String tipoEnvio = datos[8].trim().toUpperCase();
                 double tarifaZona = Double.parseDouble(datos[9].trim());
 
-                EstrategiaEnvio estrategia = crearEstrategia(tipoEnvio, tarifaZona);
+                EstrategiaEnvio estrategia = resolverEstrategia(tipoEnvio, tarifaZona);
                 Pedido p = new Pedido(id, cliente, subtotal, pesoKg, cantSolicitada, stockDisp, historial, cobertura, estrategia);
                 registrarObservadores(p);
                 pedidos.add(p);
-                cargados++;
             }
-            System.out.println("Se cargaron " + cargados + " pedidos exitosamente desde '" + ruta + "'.");
+            System.out.println("Se cargaron " + lineas.size() + " pedidos exitosamente desde '" + ruta + "'.");
         } catch (IOException | RuntimeException e) {
             System.out.println("Error al leer el archivo CSV: " + e.getMessage());
         }
@@ -147,33 +156,22 @@ public class Main {
             boolean cobertura = Boolean.parseBoolean(scanner.nextLine().trim());
 
             System.out.print("Tipo de envío (1=Estándar, 2=Express, 3=Internacional): ");
-            int tipo = Integer.parseInt(scanner.nextLine().trim());
-            EstrategiaEnvio estrategia;
-            if (tipo == 2) {
-                estrategia = new EnvioExpress();
-            } else if (tipo == 3) {
-                System.out.print("Tarifa base de zona internacional ($): ");
-                double zona = Double.parseDouble(scanner.nextLine().trim());
-                estrategia = new EnvioInternacional(zona);
-            } else {
-                estrategia = new EnvioEstandar();
-            }
+            String tipo = scanner.nextLine().trim();
+            System.out.print("Tarifa base de zona (0 si es nacional): ");
+            double zona = Double.parseDouble(scanner.nextLine().trim());
 
+            EstrategiaEnvio estrategia = resolverEstrategia(tipo, zona);
             Pedido nuevo = new Pedido(id, cliente, subtotal, peso, cantidad, stock, historial, cobertura, estrategia);
             registrarObservadores(nuevo);
             pedidos.add(nuevo);
-            System.out.println("Pedido #" + id + " creado correctamente.");
+            System.out.println("Pedido #" + id + " creado correctamente con estrategia " + estrategia.getNombre() + ".");
         } catch (NumberFormatException e) {
-            System.out.println("Error: Dato numérico inválido. Intenta nuevamente.");
+            System.out.println("Error: Dato numérico inválido.");
         }
     }
 
     private static void listarPedidos() {
-        if (pedidos.isEmpty()) {
-            System.out.println("No hay pedidos registrados. Carga el CSV o crea uno manualmente.");
-            return;
-        }
-        System.out.println("\n--- LISTADO DE PEDIDOS ---");
+        System.out.println("\n--- LISTADO DE PEDIDOS (" + pedidos.size() + ") ---");
         for (Pedido p : pedidos) {
             System.out.printf("ID: %s | Cliente: %s | Estado: %s | Estrategia: %s | Subtotal: $%.2f | Envío: $%.2f | Total: $%.2f%n",
                     p.getId(),
@@ -187,66 +185,46 @@ public class Main {
     }
 
     private static void validarPedido(Scanner scanner) {
-        Pedido p = buscarPedido(scanner);
-        if (p == null) return;
-
-        try {
-            cadenaValidacion.validar(p);
-            System.out.println("[OK] El pedido #" + p.getId() + " superó todas las validaciones (Stock, Monto, Fraude y Cobertura).");
-        } catch (ValidacionPedidoException e) {
-            System.out.println("[RECHAZADO] " + e.getMessage());
-        }
+        buscarPedido(scanner).ifPresent(p -> {
+            try {
+                cadenaValidacion.validar(p);
+                System.out.println("[OK] El pedido #" + p.getId() + " superó todas las validaciones.");
+            } catch (ValidacionPedidoException e) {
+                System.out.println("[RECHAZADO] " + e.getMessage());
+            }
+        });
     }
 
     private static void cambiarEstrategiaEnvio(Scanner scanner) {
-        Pedido p = buscarPedido(scanner);
-        if (p == null) return;
-
-        System.out.println("Estrategia actual: " + p.getEstrategiaEnvio().getNombre() + " ($" + p.calcularCostoEnvio() + ")");
-        System.out.print("Nueva estrategia (1=Estándar, 2=Express, 3=Internacional): ");
-        try {
-            int tipo = Integer.parseInt(scanner.nextLine().trim());
-            if (tipo == 1) {
-                p.setEstrategiaEnvio(new EnvioEstandar());
-            } else if (tipo == 2) {
-                p.setEstrategiaEnvio(new EnvioExpress());
-            } else if (tipo == 3) {
-                System.out.print("Tarifa base de zona internacional ($): ");
+        buscarPedido(scanner).ifPresent(p -> {
+            System.out.println("Estrategia actual: " + p.getEstrategiaEnvio().getNombre() + " ($" + p.calcularCostoEnvio() + ")");
+            System.out.print("Nueva estrategia (1=Estándar, 2=Express, 3=Internacional): ");
+            String tipo = scanner.nextLine().trim();
+            System.out.print("Tarifa base de zona (0 si es nacional): ");
+            try {
                 double zona = Double.parseDouble(scanner.nextLine().trim());
-                p.setEstrategiaEnvio(new EnvioInternacional(zona));
-            } else {
-                System.out.println("Opción no válida.");
-                return;
+                p.setEstrategiaEnvio(resolverEstrategia(tipo, zona));
+                System.out.printf("Estrategia actualizada a %s. Nuevo costo de envío: $%.2f | Total: $%.2f%n",
+                        p.getEstrategiaEnvio().getNombre(), p.calcularCostoEnvio(), p.calcularTotal());
+            } catch (NumberFormatException e) {
+                System.out.println("Entrada numérica inválida.");
             }
-            System.out.printf("Estrategia actualizada a %s. Nuevo costo de envío: $%.2f | Total: $%.2f%n",
-                    p.getEstrategiaEnvio().getNombre(), p.calcularCostoEnvio(), p.calcularTotal());
-        } catch (NumberFormatException e) {
-            System.out.println("Entrada numérica inválida.");
-        }
+        });
     }
 
     private static void gestionarEstadoPedido(Scanner scanner) {
-        Pedido p = buscarPedido(scanner);
-        if (p == null) return;
-
-        System.out.println("Estado actual de #" + p.getId() + ": " + p.getEstadoActual().getNombre());
-        System.out.println("Acción: 1=Pagar | 2=Preparar | 3=Enviar | 4=Entregar | 5=Cancelar");
-        System.out.print("Seleccione acción: ");
-        try {
-            int accion = Integer.parseInt(scanner.nextLine().trim());
-            switch (accion) {
-                case 1 -> p.pagar();
-                case 2 -> p.preparar();
-                case 3 -> p.enviar();
-                case 4 -> p.entregar();
-                case 5 -> p.cancelar();
-                default -> System.out.println("Acción no válida.");
+        buscarPedido(scanner).ifPresent(p -> {
+            System.out.println("Estado actual de #" + p.getId() + ": " + p.getEstadoActual().getNombre());
+            System.out.println("Acción: 1=Pagar | 2=Preparar | 3=Enviar | 4=Entregar | 5=Cancelar");
+            System.out.print("Seleccione acción: ");
+            String accionKey = scanner.nextLine().trim();
+            try {
+                AccionEstado accion = ACCIONES_ESTADO.getOrDefault(accionKey, ped -> System.out.println("Acción no válida."));
+                accion.ejecutar(p);
+            } catch (TransicionInvalidaException e) {
+                System.out.println("[TRANSICIÓN BLOQUEADA] " + e.getMessage());
             }
-        } catch (TransicionInvalidaException e) {
-            System.out.println("[TRANSICIÓN BLOQUEADA] " + e.getMessage());
-        } catch (NumberFormatException e) {
-            System.out.println("Entrada inválida.");
-        }
+        });
     }
 
     private static void mostrarHistorialObservers() {
@@ -257,28 +235,23 @@ public class Main {
         bodegaObs.getOrdenesAlistamiento().forEach(System.out::println);
     }
 
-    private static Pedido buscarPedido(Scanner scanner) {
-        if (pedidos.isEmpty()) {
-            System.out.println("No hay pedidos cargados.");
-            return null;
-        }
+    private static Optional<Pedido> buscarPedido(Scanner scanner) {
         System.out.print("Ingrese el ID del pedido (ej. PED-101): ");
         String id = scanner.nextLine().trim();
-        for (Pedido p : pedidos) {
-            if (p.getId().equalsIgnoreCase(id)) {
-                return p;
-            }
-        }
-        System.out.println("No se encontró ningún pedido con ID: " + id);
-        return null;
+        Optional<Pedido> encontrado = pedidos.stream()
+                .filter(p -> p.getId().equalsIgnoreCase(id))
+                .findFirst();
+        encontrado.ifPresentOrElse(
+                p -> {},
+                () -> System.out.println("No se encontró ningún pedido con ID: " + id)
+        );
+        return encontrado;
     }
 
-    private static EstrategiaEnvio crearEstrategia(String tipo, double tarifaZona) {
-        return switch (tipo) {
-            case "EXPRESS" -> new EnvioExpress();
-            case "INTERNACIONAL" -> new EnvioInternacional(tarifaZona);
-            default -> new EnvioEstandar();
-        };
+    private static EstrategiaEnvio resolverEstrategia(String clave, double tarifaZona) {
+        return REGISTRO_ESTRATEGIAS
+                .getOrDefault(clave.toUpperCase(), tarifa -> new EnvioEstandar())
+                .apply(tarifaZona);
     }
 
     private static void registrarObservadores(Pedido p) {
